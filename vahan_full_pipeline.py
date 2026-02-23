@@ -59,15 +59,26 @@ def run_scraper(selected_types=None, start_year=2018, end_year=2026):
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True
     })
-    browser = webdriver.Edge(options=edge_options)
-    url = "https://vahan.parivahan.gov.in/vahan4dashboard/vahan/view/reportview.xhtml"
-    browser.get(url)
-    wait = WebDriverWait(browser, 30)
-    time.sleep(5)
-    select_primefaces_dropdown(browser, wait, "xaxisVar", "Month Wise")
-    year_type_container = wait.until(EC.presence_of_element_located((By.ID, "selectedYearType")))
-    if "ui-state-disabled" not in year_type_container.get_attribute("class"):
-        select_primefaces_dropdown(browser, wait, "selectedYearType", "Calendar Year")
+    def start_browser():
+        edge_options = Options()
+        edge_options.use_chromium = True
+        edge_options.add_experimental_option("prefs", {
+            "download.default_directory": DOWNLOAD_DIR,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True
+        })
+        browser = webdriver.Edge(options=edge_options)
+        url = "https://vahan.parivahan.gov.in/vahan4dashboard/vahan/view/reportview.xhtml"
+        browser.get(url)
+        wait = WebDriverWait(browser, 30)
+        time.sleep(5)
+        select_primefaces_dropdown(browser, wait, "xaxisVar", "Month Wise")
+        year_type_container = wait.until(EC.presence_of_element_located((By.ID, "selectedYearType")))
+        if "ui-state-disabled" not in year_type_container.get_attribute("class"):
+            select_primefaces_dropdown(browser, wait, "selectedYearType", "Calendar Year")
+        return browser, wait
+
     yaxis_options = [
         "Vehicle Category",
         "Vehicle Class",
@@ -78,7 +89,13 @@ def run_scraper(selected_types=None, start_year=2018, end_year=2026):
     ]
     if selected_types:
         yaxis_options = [y for y in yaxis_options if y in selected_types]
-    for yaxis in yaxis_options:
+
+    browser, wait = start_browser()
+    for idx, yaxis in enumerate(yaxis_options):
+        # Restart browser after every 2 Y-Axis
+        if idx > 0 and idx % 2 == 0:
+            browser.quit()
+            browser, wait = start_browser()
         for attempt_yaxis in range(3):
             try:
                 select_primefaces_dropdown(browser, wait, "yaxisVar", yaxis)
@@ -140,7 +157,7 @@ def run_scraper(selected_types=None, start_year=2018, end_year=2026):
     browser.quit()
 
 # --- Master Sheet Compilation ---
-def compile_master_sheet():
+def compile_master_sheet(clean_master=False):
     criteria_folders = [f for f in os.listdir(DOWNLOAD_DIR) if os.path.isdir(os.path.join(DOWNLOAD_DIR, f))]
     writer = pd.ExcelWriter(os.path.join(DOWNLOAD_DIR, 'master_sheet.xlsx'), engine='openpyxl')
     for folder in criteria_folders:
@@ -171,9 +188,23 @@ def compile_master_sheet():
                 print(f"Failed to read {file_path}: {e}")
         if merged_data:
             sheet_name = folder.replace('_', ' ')[:31]
-            # Write merged_data preserving header rows
             merged_df = pd.DataFrame(merged_data)
-            merged_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+            if clean_master:
+                # Remove first 3 rows
+                merged_df = merged_df.iloc[3:].reset_index(drop=True)
+                # Rename columns based on row 0 (now the header row)
+                import re
+                def clean_month_header(val):
+                    if isinstance(val, str):
+                        m = re.match(r"([A-Za-z]+)[\s\-/]*(\d{4})", val)
+                        if m:
+                            month = m.group(1)[:3].lower()
+                            year = m.group(2)
+                            return f"{month}-{year}"
+                    return val
+                merged_df.columns = [clean_month_header(x) for x in merged_df.iloc[0]]
+                merged_df = merged_df.iloc[1:].reset_index(drop=True)
+            merged_df.to_excel(writer, sheet_name=sheet_name, index=False)
     writer.close()
     print('Master sheet created at:', os.path.join(DOWNLOAD_DIR, 'master_sheet.xlsx'))
 
@@ -182,13 +213,20 @@ if __name__ == "__main__":
     parser.add_argument('--type', nargs='*', help='Y-Axis types to scrape (e.g. "Maker" "Fuel")')
     parser.add_argument('--start-year', type=int, default=2018, help='Start year (inclusive)')
     parser.add_argument('--end-year', type=int, default=2026, help='End year (inclusive)')
-    parser.add_argument('--no-compile', action='store_true', help='Skip compiling master sheet')
-    parser.add_argument('--compile-only', action='store_true', help='Only compile master sheet, skip scraping')
+    parser.add_argument('--scrape', action='store_true', help='Run scraping only (no compilation)')
+    parser.add_argument('--compile', action='store_true', help='Compile master sheet only (no scraping)')
+    parser.add_argument('--clean-master', action='store_true', help='Clean master sheet: remove first 3 rows and rename columns to month-year format')
+    parser.add_argument('--all', action='store_true', help='Run full pipeline: scrape, compile, and clean master sheet')
     args = parser.parse_args()
 
-    if args.compile_only:
-        compile_master_sheet()
-    else:
+    # Default: run full pipeline if no specific action is given
+    if args.all or (not args.scrape and not args.compile and not args.clean_master):
         run_scraper(selected_types=args.type, start_year=args.start_year, end_year=args.end_year)
-        if not args.no_compile:
-            compile_master_sheet()
+        compile_master_sheet(clean_master=True)
+    elif args.scrape:
+        run_scraper(selected_types=args.type, start_year=args.start_year, end_year=args.end_year)
+    elif args.compile:
+        compile_master_sheet(clean_master=args.clean_master)
+    elif args.clean_master:
+        # Only clean the master sheet (assumes master_sheet.xlsx already exists)
+        compile_master_sheet(clean_master=True)
