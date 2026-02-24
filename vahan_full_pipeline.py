@@ -146,7 +146,9 @@ def compile_master_sheet(clean_master=False):
     for folder in criteria_folders:
         folder_path = os.path.join(DOWNLOAD_DIR, folder)
         year_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.xlsx')], key=lambda x: int(x.split('_')[-1].replace('.xlsx','')))
-        appended_data = []
+        dfs = []
+        keys_set = set()
+        headers = []
         for file in year_files:
             file_path = os.path.join(folder_path, file)
             try:
@@ -159,16 +161,36 @@ def compile_master_sheet(clean_master=False):
                 wb.save(file_path)
                 wb.close()
                 df = pd.read_excel(file_path, header=None)
-                # Add rows 4 to end (index 3 onward)
-                data_rows = df.iloc[3:].reset_index(drop=True)
-                # Delete column 1 (index 0)
-                data_rows = data_rows.drop(data_rows.columns[0], axis=1)
-                appended_data.append(data_rows)
+                # Remove first 3 rows and column 1
+                df = df.iloc[3:].reset_index(drop=True)
+                df = df.drop(df.columns[0], axis=1)
+                # First row is header
+                header_row = df.iloc[0].fillna('')
+                # Ensure all columns have unique names (keep empty/nan columns)
+                header_row = [str(h).strip() if h else f'col_{i}' for i, h in enumerate(header_row)]
+                df.columns = header_row
+                df = df[1:].reset_index(drop=True)
+                # Use column 1 (now first col) as key
+                df = df.set_index(df.columns[0])
+                keys_set.update(df.index)
+                dfs.append(df)
+                headers.append(header_row[1:])
             except Exception as e:
                 print(f"Failed to read {file_path}: {e}")
-        if appended_data:
+        # Merge all dfs horizontally by index (key)
+        if dfs:
+            all_keys = sorted(keys_set)
+            merged = pd.DataFrame(index=all_keys)
+            for i, df in enumerate(dfs):
+                df.index.name = None
+                # Always include all columns, including 'JAN'
+                df_cols = [f'{col}_{i}' for col in df.columns if col != df.index.name]
+                df_to_join = df.loc[:, [col for col in df.columns if col != df.index.name]]
+                df_to_join.columns = df_cols
+                merged = merged.join(df_to_join, how='outer')
+            merged = merged.reset_index()
+            merged_df = merged.rename(columns={'index': 'Key'})
             sheet_name = folder.replace('_', ' ')[:31]
-            merged_df = pd.concat(appended_data, ignore_index=True)
             merged_df.to_excel(writer, sheet_name=sheet_name, index=False)
     writer.close()
     print('Master sheet created at:', os.path.join(DOWNLOAD_DIR, 'master_sheet.xlsx'))
