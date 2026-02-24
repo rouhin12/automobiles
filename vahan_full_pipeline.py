@@ -59,26 +59,15 @@ def run_scraper(selected_types=None, start_year=2018, end_year=2026):
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True
     })
-    def start_browser():
-        edge_options = Options()
-        edge_options.use_chromium = True
-        edge_options.add_experimental_option("prefs", {
-            "download.default_directory": DOWNLOAD_DIR,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "safebrowsing.enabled": True
-        })
-        browser = webdriver.Edge(options=edge_options)
-        url = "https://vahan.parivahan.gov.in/vahan4dashboard/vahan/view/reportview.xhtml"
-        browser.get(url)
-        wait = WebDriverWait(browser, 30)
-        time.sleep(5)
-        select_primefaces_dropdown(browser, wait, "xaxisVar", "Month Wise")
-        year_type_container = wait.until(EC.presence_of_element_located((By.ID, "selectedYearType")))
-        if "ui-state-disabled" not in year_type_container.get_attribute("class"):
-            select_primefaces_dropdown(browser, wait, "selectedYearType", "Calendar Year")
-        return browser, wait
-
+    browser = webdriver.Edge(options=edge_options)
+    url = "https://vahan.parivahan.gov.in/vahan4dashboard/vahan/view/reportview.xhtml"
+    browser.get(url)
+    wait = WebDriverWait(browser, 30)
+    time.sleep(5)
+    select_primefaces_dropdown(browser, wait, "xaxisVar", "Month Wise")
+    year_type_container = wait.until(EC.presence_of_element_located((By.ID, "selectedYearType")))
+    if "ui-state-disabled" not in year_type_container.get_attribute("class"):
+        select_primefaces_dropdown(browser, wait, "selectedYearType", "Calendar Year")
     yaxis_options = [
         "Vehicle Category",
         "Vehicle Class",
@@ -89,13 +78,7 @@ def run_scraper(selected_types=None, start_year=2018, end_year=2026):
     ]
     if selected_types:
         yaxis_options = [y for y in yaxis_options if y in selected_types]
-
-    browser, wait = start_browser()
-    for idx, yaxis in enumerate(yaxis_options):
-        # Restart browser after every 2 Y-Axis
-        if idx > 0 and idx % 2 == 0:
-            browser.quit()
-            browser, wait = start_browser()
+    for yaxis in yaxis_options:
         for attempt_yaxis in range(3):
             try:
                 select_primefaces_dropdown(browser, wait, "yaxisVar", yaxis)
@@ -163,47 +146,29 @@ def compile_master_sheet(clean_master=False):
     for folder in criteria_folders:
         folder_path = os.path.join(DOWNLOAD_DIR, folder)
         year_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.xlsx')], key=lambda x: int(x.split('_')[-1].replace('.xlsx','')))
-        header_rows = 5
-        merged_data = []
+        appended_data = []
         for file in year_files:
             file_path = os.path.join(folder_path, file)
             try:
+                import openpyxl
+                wb = openpyxl.load_workbook(file_path)
+                ws = wb.active
+                cell_a1 = ws['A1'].value
+                # Copy cell A1 to B4
+                ws['B4'] = cell_a1
+                wb.save(file_path)
+                wb.close()
                 df = pd.read_excel(file_path, header=None)
-                # Ensure columns are string for .str operations
-                df.columns = df.columns.map(str)
-                df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-                # If first file, initialize merged_data
-                if not merged_data:
-                    merged_data = df.values.tolist()
-                else:
-                    # Find last merged column in row 0 (header row)
-                    last_col = len(merged_data[0])
-                    # Append new year data just after last_col
-                    for i in range(len(df)):
-                        # If merged_data has fewer rows, extend
-                        if i >= len(merged_data):
-                            merged_data.append([None]*last_col)
-                        merged_data[i].extend(df.iloc[i].tolist())
+                # Add rows 4 to end (index 3 onward)
+                data_rows = df.iloc[3:].reset_index(drop=True)
+                # Delete column 1 (index 0)
+                data_rows = data_rows.drop(data_rows.columns[0], axis=1)
+                appended_data.append(data_rows)
             except Exception as e:
                 print(f"Failed to read {file_path}: {e}")
-        if merged_data:
+        if appended_data:
             sheet_name = folder.replace('_', ' ')[:31]
-            merged_df = pd.DataFrame(merged_data)
-            if clean_master:
-                # Remove first 3 rows
-                merged_df = merged_df.iloc[3:].reset_index(drop=True)
-                # Rename columns based on row 0 (now the header row)
-                import re
-                def clean_month_header(val):
-                    if isinstance(val, str):
-                        m = re.match(r"([A-Za-z]+)[\s\-/]*(\d{4})", val)
-                        if m:
-                            month = m.group(1)[:3].lower()
-                            year = m.group(2)
-                            return f"{month}-{year}"
-                    return val
-                merged_df.columns = [clean_month_header(x) for x in merged_df.iloc[0]]
-                merged_df = merged_df.iloc[1:].reset_index(drop=True)
+            merged_df = pd.concat(appended_data, ignore_index=True)
             merged_df.to_excel(writer, sheet_name=sheet_name, index=False)
     writer.close()
     print('Master sheet created at:', os.path.join(DOWNLOAD_DIR, 'master_sheet.xlsx'))
