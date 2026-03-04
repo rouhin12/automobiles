@@ -182,14 +182,47 @@ def compile_master_sheet(clean_master=False):
             all_keys = sorted(keys_set)
             merged = pd.DataFrame(index=all_keys)
             for i, df in enumerate(dfs):
+                year = int(year_files[i].split('_')[-1].replace('.xlsx', ''))
                 df.index.name = None
-                # Always include all columns, including 'JAN'
-                df_cols = [f'{col}_{i}' for col in df.columns if col != df.index.name]
+                # Column names: "Jan 2018", "Feb 2018", ... or "Total 2018" for non-month 13th column
+                month_names_raw = ('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC')
+                def month_year_label(col):
+                    col_str = str(col).strip().upper()
+                    if len(col_str) >= 3 and col_str[:3] in month_names_raw:
+                        month_str = str(col).strip()
+                        month_display = month_str[:1].upper() + month_str[1:].lower() if len(month_str) >= 3 else month_str
+                        return f"{month_display} {year}"
+                    return f"Total {year}"  # 13th column (e.g. Col_12, Total) → Total YYYY
+                df_cols = [month_year_label(col) for col in df.columns if col != df.index.name]
                 df_to_join = df.loc[:, [col for col in df.columns if col != df.index.name]]
                 df_to_join.columns = df_cols
                 merged = merged.join(df_to_join, how='outer')
             merged = merged.reset_index()
             merged_df = merged.rename(columns={'index': 'Key'})
+            # Only 1st column (Key) is non-numeric; parse all other columns as int (strip commas first)
+            key_col_name = merged_df.columns[0]
+            numeric_cols = [c for c in merged_df.columns if c != key_col_name]
+            def parse_numeric_series(s):
+                return pd.to_numeric(s.astype(str).str.replace(',', '', regex=False), errors='coerce')
+            merged_df[numeric_cols] = merged_df[numeric_cols].apply(parse_numeric_series).fillna(0).astype('int64')
+            # Add Total (Year) only if not already present (source may have 13th column as Total)
+            month_names = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+            years_in_data = set()
+            for c in numeric_cols:
+                parts = str(c).strip().split()
+                if len(parts) == 2 and parts[0] in month_names and parts[1].isdigit():
+                    years_in_data.add(int(parts[1]))
+            for year in sorted(years_in_data):
+                if f'Total {year}' in merged_df.columns:
+                    continue
+                year_cols = [c for c in numeric_cols if str(c).strip().endswith(str(year)) and str(c).split()[0] in month_names]
+                if len(year_cols) == 12:
+                    merged_df[f'Total {year}'] = merged_df[year_cols].sum(axis=1)
+            # Put Total YYYY columns at end (after all month columns)
+            all_cols = [c for c in merged_df.columns if c != key_col_name]
+            month_cols_ordered = [c for c in all_cols if not str(c).startswith('Total ')]
+            total_cols = [c for c in all_cols if str(c).startswith('Total ')]
+            merged_df = merged_df[[key_col_name] + month_cols_ordered + total_cols]
             sheet_name = folder.replace('_', ' ')[:31]
             merged_df.to_excel(writer, sheet_name=sheet_name, index=False)
     writer.close()
