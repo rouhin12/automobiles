@@ -317,32 +317,24 @@ def run_dashboard():
 
     tab_overview, tab_charts, tab_trends, tab_rankings = st.tabs(["Overview", "Charts", "Growth", "Rankings"])
 
-    # ---- Overview ----
+    # ---- Overview: no selector, briefs of all aspects, no View ----
     with tab_overview:
-        overview_sheet = st.selectbox(
-            "Overview for",
-            sheet_names,
-            index=sheet_names.index("Maker") if "Maker" in sheet_names else 0,
-            key="overview_sheet",
-            format_func=lambda x: labels.get(x, {}).get("title", x),
-        )
-        sheet_title = labels.get(overview_sheet, {}).get("title", overview_sheet)
-        df_ov, key_col_ov, months_ov, totals_ov, key_label_ov = load_sheet_data(overview_sheet)
-
-        if df_ov is None or df_ov.empty:
-            st.info("No data for this sheet.")
+        # Use Maker (or first sheet) for date range and total/active
+        ref_sheet = "Maker" if "Maker" in sheet_names else sheet_names[0]
+        df_ref, key_ref, months_ref, totals_ref, key_label_ref = load_sheet_data(ref_sheet)
+        if df_ref is None or df_ref.empty or not months_ref:
+            st.info("No monthly data available.")
             render_footer()
-        elif months_ov:
-            month_cols_sorted = sort_month_columns(months_ov)
+        else:
+            month_cols_sorted = sort_month_columns(months_ref)
             from_to_options = get_from_to_options(month_cols_sorted)
             if not from_to_options:
                 st.warning("No month columns found.")
                 render_footer()
             else:
-                # Date picker: From and To (month-year)
                 opt_labels = [x[0] for x in from_to_options]
                 default_to_idx = len(from_to_options) - 1
-                default_from_idx = max(0, default_to_idx - 11)  # e.g. last 12 months
+                default_from_idx = max(0, default_to_idx - 11)
                 col_from, col_to = st.columns(2)
                 with col_from:
                     from_idx = st.selectbox("**From** (month–year)", range(len(opt_labels)), format_func=lambda i: opt_labels[i], index=default_from_idx, key="overview_from")
@@ -356,40 +348,35 @@ def run_dashboard():
                 cols_this = cols_in_range(month_cols_sorted, from_year, from_month, to_year, to_month)
                 period_label = f"{from_label} – {to_label}" if from_idx != to_idx else to_label
 
-                # Previous year same range for YoY
                 n_months = len(cols_this)
                 prev_year = to_year - 1
                 cols_last = cols_in_range(month_cols_sorted, prev_year, from_month, prev_year, to_month) if n_months <= 12 else []
 
-                total_vol = df_ov[cols_this].sum().sum() if cols_this else 0
-                total_vol_prev = df_ov[cols_last].sum().sum() if cols_last else 0
+                total_vol = df_ref[cols_this].sum().sum() if cols_this else 0
+                total_vol_prev = df_ref[cols_last].sum().sum() if cols_last else 0
                 yoy_pct = round((total_vol - total_vol_prev) / total_vol_prev * 100, 1) if total_vol_prev and total_vol_prev > 0 else None
 
-                # Active = entities with at least one registration in the To month only (this month)
-                col_this_month = to_label  # column name e.g. "Mar 2024"
-                if col_this_month in df_ov.columns:
-                    n_active = (df_ov[col_this_month] > 0).sum()
+                if to_label in df_ref.columns:
+                    n_active = (df_ref[to_label] > 0).sum()
                 else:
                     n_active = 0
-                entity_label = key_label_ov if n_active == 1 else (key_label_ov + "s")
 
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric("Vehicle registrations (period)", f"{int(total_vol):,}", delta=f"{yoy_pct}% YoY" if yoy_pct is not None else None)
                 with col2:
                     st.metric("Period", period_label, delta=f"vs same range {prev_year}" if cols_last else None)
                 with col3:
-                    st.metric(f"Active {entity_label} (in {to_label})", str(n_active), None)
-                with col4:
-                    st.metric("View", sheet_title, None)
+                    st.metric(f"Active makers (in {to_label})", str(n_active), None)
 
-                # Segment mix (when Maker): simple table by segment — not maker-wise, just segment mix
-                if overview_sheet == "Maker":
-                    maker_to_cat = get_maker_to_category()
-                    df_ov_c = df_ov.copy()
-                    df_ov_c["_cat"] = df_ov_c[key_col_ov].apply(lambda k: get_maker_category_for_key(k, maker_to_cat))
-                    seg_df = df_ov_c[df_ov_c["_cat"].notna()]
-                    if not seg_df.empty and cols_this:
+                # Segment mix (from Maker data)
+                maker_to_cat = get_maker_to_category()
+                df_maker, key_maker, months_maker, _, _ = load_sheet_data("Maker")
+                if df_maker is not None and not df_maker.empty and cols_this and all(c in df_maker.columns for c in cols_this):
+                    df_maker = df_maker.copy()
+                    df_maker["_cat"] = df_maker[key_maker].apply(lambda k: get_maker_category_for_key(k, maker_to_cat))
+                    seg_df = df_maker[df_maker["_cat"].notna()]
+                    if not seg_df.empty:
                         seg_vol = seg_df.groupby("_cat")[cols_this].sum().sum(axis=1).sort_values(ascending=False)
                         if seg_vol.sum() > 0:
                             st.subheader("Segment mix")
@@ -399,90 +386,83 @@ def run_dashboard():
                             seg_tbl["Share %"] = (seg_tbl["Registrations"] / seg_tbl["Registrations"].sum() * 100).round(1)
                             st.dataframe(seg_tbl, use_container_width=True, hide_index=True)
 
+                # Briefs by aspect — single table
+                st.subheader("Briefs by aspect")
+                from dashboard_config import MAKER_CLASSIFICATION
+                brief_rows = []
+                for sheet in sheet_names:
+                    title = labels.get(sheet, {}).get("title", sheet)
+                    df_s, k, months_s, totals_s, kl = load_sheet_data(sheet)
+                    if df_s is None or df_s.empty:
+                        brief_rows.append({"Aspect": title, "Registrations": 0, "Active": 0, "Top 3": "—"})
+                        continue
+                    cols_s = cols_in_range(sort_month_columns(months_s), from_year, from_month, to_year, to_month) if months_s else []
+                    if not cols_s and totals_s:
+                        y_col = next((c for c in totals_s if str(to_year) in c), None)
+                        cols_s = [y_col] if y_col and y_col in df_s.columns else []
+                    if not cols_s:
+                        brief_rows.append({"Aspect": title, "Registrations": 0, "Active": 0, "Top 3": "No data"})
+                        continue
+                    df_s = df_s.copy()
+                    df_s["_vol"] = df_s[cols_s].sum(axis=1)
+                    vol = df_s["_vol"].sum()
+                    n_ent = int((df_s["_vol"] > 0).sum())
+                    top3 = df_s.nlargest(3, "_vol")
+                    top3_str = "; ".join(f"{str(r[k])[:24]}{'…' if len(str(r[k])) > 24 else ''} ({r['_vol']/vol*100:.1f}%)" for _, r in top3.iterrows()) if vol else "—"
+                    brief_rows.append({"Aspect": title, "Registrations": int(vol), "Active": n_ent, "Top 3": top3_str})
+                brief_df = pd.DataFrame(brief_rows)
+                st.dataframe(brief_df, use_container_width=True, hide_index=True, column_config={"Registrations": st.column_config.NumberColumn(format="%d")})
+
+                # Top 3 makers by segment + Top 5 states (compact)
                 c1, c2 = st.columns(2)
                 with c1:
-                    if overview_sheet == "Maker":
-                        # Top 3 makers per vehicle classification (PV, 2W, CV, EV-PV, Tractors)
-                        from dashboard_config import MAKER_CLASSIFICATION
-                        maker_to_cat = get_maker_to_category()
-                        df_ov["_vol"] = df_ov[cols_this].sum(axis=1)
-                        df_ov["_cat"] = df_ov[key_col_ov].apply(lambda k: get_maker_category_for_key(k, maker_to_cat))
+                    df_maker, key_maker, months_maker, _, _ = load_sheet_data("Maker")
+                    if df_maker is not None and not df_maker.empty and cols_this:
+                        df_maker = df_maker.copy()
+                        df_maker["_vol"] = df_maker[cols_this].sum(axis=1)
+                        df_maker["_cat"] = df_maker[key_maker].apply(lambda k: get_maker_category_for_key(k, maker_to_cat))
                         seg_order = list(MAKER_CLASSIFICATION.keys())
                         top3_rows = []
                         for seg in seg_order:
-                            df_seg = df_ov[df_ov["_cat"] == seg]
+                            df_seg = df_maker[df_maker["_cat"] == seg]
                             if df_seg.empty:
                                 continue
-                            top3 = df_seg.nlargest(3, "_vol")[[key_col_ov, "_vol"]].copy()
-                            top3.columns = [key_label_ov, "Registrations"]
+                            top3 = df_seg.nlargest(3, "_vol")[[key_maker, "_vol"]].copy()
+                            top3.columns = ["Maker", "Registrations"]
                             top3["Segment"] = seg
                             top3["Share %"] = (top3["Registrations"] / total_vol * 100).round(1) if total_vol else 0
                             top3_rows.append(top3)
                         if top3_rows:
                             top3_df = pd.concat(top3_rows, ignore_index=True)
-                            top3_df = top3_df[["Segment", key_label_ov, "Registrations", "Share %"]]
-                            st.markdown("**Top 3 makers by vehicle classification**")
-                            st.dataframe(top3_df, use_container_width=True, hide_index=True)
-                        else:
+                            top3_df = top3_df[["Segment", "Maker", "Registrations", "Share %"]]
                             st.markdown("**Top 3 makers by segment**")
-                            st.caption("No classified makers in data.")
-                    else:
-                        df_ov["_vol"] = df_ov[cols_this].sum(axis=1)
-                        top5 = df_ov.nlargest(5, "_vol")[[key_col_ov, "_vol"]].copy()
-                        top5.columns = [key_label_ov, "Registrations"]
-                        top5["Share %"] = (top5["Registrations"] / total_vol * 100).round(1) if total_vol else 0
-                        st.markdown(f"**Top 5 {key_label_ov}**")
-                        st.dataframe(top5, use_container_width=True, hide_index=True)
+                            st.dataframe(top3_df, use_container_width=True, hide_index=True)
                 with c2:
-                    if overview_sheet == "Maker":
-                        state_df, st_key, st_months, _, _ = load_sheet_data("State")
-                        if state_df is not None and not state_df.empty and st_months:
-                            st_cols = [c for c in st_months if c in cols_this]
-                            if st_cols:
-                                state_df = state_df.copy()
-                                state_df["_vol"] = state_df[st_cols].sum(axis=1)
-                                top5s = state_df.nlargest(5, "_vol")[[st_key, "_vol"]].copy()
-                                top5s.columns = ["State", "Registrations"]
-                                st.markdown("**Top 5 states**")
-                                st.dataframe(top5s, use_container_width=True, hide_index=True)
-                            else:
-                                st.caption("No state data for this period.")
-                        else:
-                            st.caption("State sheet not available.")
-                    else:
-                        st.caption("Select Maker for state comparison.")
+                    state_df, st_key, st_months, _, _ = load_sheet_data("State")
+                    if state_df is not None and not state_df.empty and st_months:
+                        st_cols = cols_in_range(sort_month_columns(st_months), from_year, from_month, to_year, to_month)
+                        if st_cols:
+                            state_df = state_df.copy()
+                            state_df["_vol"] = state_df[st_cols].sum(axis=1)
+                            top5s = state_df.nlargest(5, "_vol")[[st_key, "_vol"]].copy()
+                            top5s.columns = ["State", "Registrations"]
+                            st.markdown("**Top 5 states**")
+                            st.dataframe(top5s, use_container_width=True, hide_index=True)
 
-                # Monthly trend: clear title and table
+                # Monthly trend (total registrations)
                 last_24 = month_cols_sorted[-24:] if len(month_cols_sorted) >= 24 else month_cols_sorted
                 months_parsed = [parse_month_year(c) for c in last_24]
                 dates = [pd.Timestamp(y, m, 1) for y, m in months_parsed if (y and m)]
                 if dates and len(dates) == len(last_24):
-                    monthly_totals = [df_ov[c].sum() for c in last_24]
-                    trend_df = pd.DataFrame({
-                        "Month–Year": [c for c in last_24],
-                        "Date": dates,
-                        "Vehicle registrations": monthly_totals,
-                    })
+                    monthly_totals = [df_ref[c].sum() for c in last_24]
+                    trend_df = pd.DataFrame({"Month–Year": list(last_24), "Date": dates, "Vehicle registrations": monthly_totals})
                     st.subheader("Monthly vehicle registration trend")
-                    st.caption("Total vehicle registrations by month (all entities in this sheet).")
-                    fig_t = px.line(trend_df, x="Date", y="Vehicle registrations", title="Monthly vehicle registrations (last 24 months)")
+                    st.caption("Total vehicle registrations by month (last 24 months).")
+                    fig_t = px.line(trend_df, x="Date", y="Vehicle registrations", title="Monthly vehicle registrations")
                     fig_t.update_layout(height=300, margin=dict(t=30), xaxis_title="Month", yaxis_title="Vehicle registrations")
                     st.plotly_chart(fig_t, use_container_width=True, config=PLOTLY_CONFIG)
                     with st.expander("View monthly registration table"):
                         st.dataframe(trend_df[["Month–Year", "Vehicle registrations"]], use_container_width=True, hide_index=True)
-        elif totals_ov:
-            latest_year = int(totals_ov[-1].split()[-1])
-            prev_year = latest_year - 1
-            year_col = next((c for c in totals_ov if str(latest_year) in c), None)
-            prev_col = next((c for c in totals_ov if str(prev_year) in c), None)
-            if year_col:
-                total_vol = df_ov[year_col].sum()
-                total_vol_prev = df_ov[prev_col].sum() if prev_col else 0
-                yoy_pct = round((total_vol - total_vol_prev) / total_vol_prev * 100, 1) if total_vol_prev > 0 else None
-                st.metric(f"Registrations — {sheet_title}", f"{int(total_vol):,}", delta=f"{yoy_pct}% YoY" if yoy_pct else None)
-                st.caption(f"Full year {latest_year} vs {prev_year} (no month-level data)")
-        else:
-            st.info("This sheet has no month or yearly columns.")
         render_footer()
 
     # ---- Charts tab: all controls in main area ----
