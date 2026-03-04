@@ -1,3 +1,5 @@
-# Dashboard (in addition to pipeline deps: pandas, openpyxl)
+# Dashboard — full deps (use this or requirements.txt for Streamlit Cloud)
+pandas>=2.0.0
+openpyxl>=3.1.0
 streamlit>=1.28.0
 plotly>=5.18.0
